@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::io::{self, Write};
 
 use async_recursion::async_recursion;
-use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -27,7 +27,7 @@ struct UsersResponse {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
+async fn main() -> anyhow::Result<()> {
     let access_token =
         env::var("ACCESS_TOKEN").expect("ACCESS_TOKEN environment variable is not set");
     let search_name = read_input("Enter the display name to search: ")?;
@@ -81,27 +81,29 @@ async fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+// Comnination of 10 concurrent connection + 4ms delay
+// makes maximum of 2500 requests/sec rate limiting!
 const MAX_CONCURRENT_REQUESTS: usize = 10;
-static REQUEST_SEMAPHORE: tokio::sync::Semaphore =
+static CONCURRENT_REQUEST_SEMAPHORE: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_CONCURRENT_REQUESTS);
+const ADD_DELAY_PER_REQUEST_MS: u64 = 4;
 
 async fn fetch_users(
     client: &Client,
     access_token: &str,
     url: &str,
 ) -> anyhow::Result<UsersResponse> {
-    let _permit = REQUEST_SEMAPHORE.acquire().await?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        AUTHORIZATION,
-        format!("Bearer {}", access_token).parse().unwrap(),
-    );
-    headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+    let _permit = CONCURRENT_REQUEST_SEMAPHORE.acquire().await?;
 
     // add a sleep here to avoid throttling
-    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(ADD_DELAY_PER_REQUEST_MS)).await;
 
-    let response = client.get(url).headers(headers).send().await?;
+    let response = client
+        .get(url)
+        .header(CONTENT_TYPE, "application/json")
+        .bearer_auth(access_token)
+        .send()
+        .await?;
 
     if !response.status().is_success() {
         let status = response.status();
