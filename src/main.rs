@@ -43,7 +43,7 @@ async fn main() -> Result<(), anyhow::Error> {
             return Ok(());
         }
 
-        println!("Select a user by entering the corresponding number:");
+        eprintln!("Select a user by entering the index number:");
         for (i, user) in users.iter().enumerate() {
             eprintln!(
                 "{}. {} (Email: {})",
