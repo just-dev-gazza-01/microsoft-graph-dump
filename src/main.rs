@@ -34,8 +34,10 @@ async fn main() -> Result<(), anyhow::Error> {
     let filter = format!("startswith(displayName, '{}')", search_name);
     let url = format!("https://graph.microsoft.com/beta/users?$filter={}", filter);
 
+    let client = Client::new();
+
     let selected_user = loop {
-        let response = fetch_users(&access_token, &url).await?;
+        let response = fetch_users(&client, &access_token, &url).await?;
         let users = response.value;
 
         if users.is_empty() {
@@ -74,7 +76,7 @@ async fn main() -> Result<(), anyhow::Error> {
     println!("id, display_name, mail, job_title, department, office_location, employment_type, location, manager_id, manager_display_name");
     println!("{}, none, none", selected_user);
 
-    fetch_reportee_tree_recursive(&access_token, &selected_user).await?;
+    fetch_reportee_tree_recursive(&client, &access_token, &selected_user).await?;
 
     Ok(())
 }
@@ -83,9 +85,12 @@ const MAX_CONCURRENT_REQUESTS: usize = 10;
 static REQUEST_SEMAPHORE: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_CONCURRENT_REQUESTS);
 
-async fn fetch_users(access_token: &str, url: &str) -> anyhow::Result<UsersResponse> {
+async fn fetch_users(
+    client: &Client,
+    access_token: &str,
+    url: &str,
+) -> anyhow::Result<UsersResponse> {
     let _permit = REQUEST_SEMAPHORE.acquire().await?;
-    let client = Client::new();
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
@@ -93,25 +98,34 @@ async fn fetch_users(access_token: &str, url: &str) -> anyhow::Result<UsersRespo
     );
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
 
-    let response = client
-        .get(url)
-        .headers(headers)
-        .send()
-        .await?
-        .json()
-        .await?;
-    Ok(response)
+    // add a sleep here to avoid throttling
+    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+    let response = client.get(url).headers(headers).send().await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let response_txt = response.text().await?;
+        anyhow::bail!("fetching users; {}: {}", status, response_txt)
+    }
+
+    let response_json = response.json().await?;
+    Ok(response_json)
 }
 
 #[async_recursion]
-async fn fetch_reportee_tree_recursive(access_token: &str, manager: &User) -> anyhow::Result<()> {
+async fn fetch_reportee_tree_recursive(
+    client: &Client,
+    access_token: &str,
+    manager: &User,
+) -> anyhow::Result<()> {
     let mut url = format!(
         "https://graph.microsoft.com/beta/users/{}/directReports",
         manager.id
     );
 
     loop {
-        let response = fetch_users(access_token, &url).await?;
+        let response = fetch_users(client, access_token, &url).await?;
         let reportees = response.value;
 
         if reportees.is_empty() {
@@ -120,15 +134,12 @@ async fn fetch_reportee_tree_recursive(access_token: &str, manager: &User) -> an
 
         for reportee in reportees {
             println!("{}, {}, {}", reportee, manager.id, manager.display_name);
-            // add a sleep here to avoid throttling
-            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-            fetch_reportee_tree_recursive(access_token, &reportee).await?;
+
+            fetch_reportee_tree_recursive(client, access_token, &reportee).await?;
         }
 
         if let Some(next_link) = response.next_link {
             url = next_link;
-            // add a sleep here to avoid throttling
-            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         } else {
             break;
         }
